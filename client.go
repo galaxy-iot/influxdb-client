@@ -2,11 +2,9 @@ package influxdb_client
 
 import (
 	"bytes"
-	"compress/gzip"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -61,19 +59,37 @@ type InfluxdbClient interface {
 
 	// Write takes a BatchPoints object and writes all Points to InfluxDB.
 	Write(point *Point) error
+
+	// Write takes a BatchPoints object and writes all Points to InfluxDB.
+	BatchWrite(batchPoint *BatchPoint) error
 }
 
 type influxdbClient struct {
 	HTTPConfig
 
-	buf bytes.Buffer
+	bodyBuf *bytes.Buffer
+	urlBuf  *bytes.Buffer
+
+	basicHeader string
 }
 
 func NewInfluxdbClient(conf HTTPConfig) InfluxdbClient {
-	return &influxdbClient{
+	c := &influxdbClient{
 		HTTPConfig: conf,
-		buf:        bytes.Buffer{},
+		bodyBuf:    &bytes.Buffer{},
+		urlBuf:     &bytes.Buffer{},
 	}
+
+	if conf.Username != "" {
+		c.urlBuf.Reset()
+		c.urlBuf.WriteString(conf.Username)
+		c.urlBuf.WriteByte(':')
+		c.urlBuf.WriteString(conf.Password)
+
+		c.basicHeader = base64.StdEncoding.EncodeToString(c.urlBuf.Bytes())
+	}
+
+	return c
 }
 
 func (i *influxdbClient) Ping(timeout time.Duration) (time.Duration, string, error) {
@@ -81,25 +97,13 @@ func (i *influxdbClient) Ping(timeout time.Duration) (time.Duration, string, err
 }
 
 func (i *influxdbClient) Write(point *Point) error {
-	b := i.buf
+	b := i.bodyBuf
 	b.Reset()
 
-	var w io.Writer
-	if i.WriteEncoding == GzipEncoding {
-		w = gzip.NewWriter(&b)
-	} else {
-		w = &b
-	}
-
-	// gzip writer should be closed to flush data into underlying buffer
-	if c, ok := w.(io.Closer); ok {
-		if err := c.Close(); err != nil {
-			return err
-		}
-	}
-
 	u := i.Addr
-	urlBuf := bytes.Buffer{}
+	urlBuf := i.urlBuf
+	urlBuf.Reset()
+
 	urlBuf.WriteString(u)
 	urlBuf.WriteString("/write?db=")
 	urlBuf.WriteString(point.GetDatabase())
@@ -110,7 +114,7 @@ func (i *influxdbClient) Write(point *Point) error {
 	urlBuf.WriteString("&consistency=")
 	urlBuf.WriteString(point.GetWriteConsistency())
 
-	path := urlBuf.String()
+	path := BytesToStr(urlBuf.Bytes())
 
 	req := fasthttp.AcquireRequest()
 	defer fasthttp.ReleaseRequest(req)
@@ -135,8 +139,56 @@ func (i *influxdbClient) Write(point *Point) error {
 	req.Header.Set("Content-Type", "")
 	req.Header.Set("User-Agent", i.UserAgent)
 	if i.Username != "" {
-		basicAuth := base64.StdEncoding.EncodeToString(StrToBytes(i.Username + ":" + i.Password))
-		req.Header.Set("Authorization", "Basic "+basicAuth)
+		req.Header.Set("Authorization", "Basic "+i.basicHeader)
+	}
+
+	resp := fasthttp.AcquireResponse()
+	defer fasthttp.ReleaseResponse(resp)
+
+	if err := fasthttp.Do(req, resp); err != nil {
+		return err
+	}
+
+	if resp.StatusCode() != http.StatusNoContent && resp.StatusCode() != http.StatusOK {
+		return fmt.Errorf(BytesToStr(resp.Body()))
+	}
+
+	return nil
+}
+
+func (i *influxdbClient) BatchWrite(batchPoint *BatchPoint) error {
+	u := i.Addr
+	urlBuf := i.urlBuf
+	urlBuf.Reset()
+
+	urlBuf.WriteString(u)
+	urlBuf.WriteString("/write?db=")
+	urlBuf.WriteString(batchPoint.GetDatabase())
+	urlBuf.WriteString("&rp=")
+	urlBuf.WriteString(batchPoint.GetRetentionPolicy())
+	urlBuf.WriteString("&precision=")
+	urlBuf.WriteString(batchPoint.GetPrecision())
+	urlBuf.WriteString("&consistency=")
+	urlBuf.WriteString(batchPoint.GetWriteConsistency())
+
+	path := BytesToStr(urlBuf.Bytes())
+
+	req := fasthttp.AcquireRequest()
+	defer fasthttp.ReleaseRequest(req)
+
+	req.Header.SetMethod(http.MethodPost)
+	req.SetRequestURI(path)
+
+	if i.WriteEncoding != DefaultEncoding {
+		req.Header.Set("Content-Encoding", string(i.WriteEncoding))
+	}
+
+	req.SetBodyRaw(batchPoint.mainBuf.Bytes())
+
+	req.Header.Set("Content-Type", "")
+	req.Header.Set("User-Agent", i.UserAgent)
+	if i.Username != "" {
+		req.Header.Set("Authorization", "Basic "+i.basicHeader)
 	}
 
 	resp := fasthttp.AcquireResponse()
