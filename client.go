@@ -137,6 +137,7 @@ func (i *influxdbClient) Write(point *Point) error {
 	req.SetBodyRaw(b.Bytes())
 
 	req.Header.Set("Content-Type", "")
+	req.Header.Set("Connection", "close")
 	req.Header.Set("User-Agent", i.UserAgent)
 	if i.Username != "" {
 		req.Header.Set("Authorization", "Basic "+i.basicHeader)
@@ -186,6 +187,7 @@ func (i *influxdbClient) BatchWrite(batchPoint *BatchPoint) error {
 	req.SetBodyRaw(batchPoint.mainBuf.Bytes())
 
 	req.Header.Set("Content-Type", "")
+	req.Header.Set("Connection", "close")
 	req.Header.Set("User-Agent", i.UserAgent)
 	if i.Username != "" {
 		req.Header.Set("Authorization", "Basic "+i.basicHeader)
